@@ -9,6 +9,12 @@ on:
         required: true
         type: string
 
+      ipa_sha256:
+        description: "Expected IPA SHA-256 (recommended; detects a changed download)"
+        default: ""
+        required: false
+        type: string
+
       display_name:
         description: "App Name"
         default: "YouTube"
@@ -25,6 +31,9 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+permissions:
+  contents: read
+
 jobs:
   build-tweak:
     name: Build YTMinimum
@@ -32,7 +41,7 @@ jobs:
 
     steps:
       - name: Check out YTMinimum
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
 
       - name: Install build dependencies
         run: brew install make ldid dpkg
@@ -44,14 +53,14 @@ jobs:
 
       - name: Cache Theos
         id: theos-cache
-        uses: actions/cache@v5
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
         with:
           path: theos
           key: theos-16362d3a-ios16.5
 
       - name: Set up Theos
         if: steps.theos-cache.outputs.cache-hit != 'true'
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           repository: theos/theos
           ref: 16362d3aa83a0acd56df4493d575d34306d42478
@@ -61,10 +70,11 @@ jobs:
       - name: Install iOS SDK
         if: steps.theos-cache.outputs.cache-hit != 'true'
         run: |
-          git clone --quiet -n --depth=1 --filter=tree:0 https://github.com/theos/sdks.git
+          git clone --quiet -n --filter=tree:0 https://github.com/theos/sdks.git
           cd sdks
           git sparse-checkout set --no-cone iPhoneOS16.5.sdk
-          git checkout
+          git fetch --quiet --depth=1 origin 0222fd5413cf4b9af096f37b4621afa2688572f7
+          git checkout --quiet --detach FETCH_HEAD
           mv iPhoneOS16.5.sdk "$THEOS/sdks/"
 
       - name: Compile YTMinimum
@@ -80,7 +90,7 @@ jobs:
           cp "$deb" ytminimum.deb
 
       - name: Upload built tweak
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: built-debs
           path: ytminimum.deb
@@ -91,24 +101,41 @@ jobs:
     name: Package IPA
     runs-on: macos-latest
     needs: build-tweak
-    permissions:
-      contents: write
 
     steps:
       - name: Download built tweak
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           name: built-debs
           path: ${{ github.workspace }}
 
-      - name: Hide sensitive inputs
-        uses: levibostian/action-hide-sensitive-inputs@v1
-        with:
-          exclude_inputs: bundle_id,display_name
-
       - name: Download and validate IPA
+        env:
+          IPA_URL: ${{ inputs.ipa_url }}
+          IPA_SHA256: ${{ inputs.ipa_sha256 }}
         run: |
-          wget "${{ github.event.inputs.ipa_url }}" --no-verbose -O youtube.ipa
+          echo "::add-mask::$IPA_URL"
+          if [[ "$IPA_URL" != https://* ]]; then
+            echo "::error::The IPA URL must use HTTPS."
+            exit 1
+          fi
+          if [ -n "$IPA_SHA256" ] && ! [[ "$IPA_SHA256" =~ ^[A-Fa-f0-9]{64}$ ]]; then
+            echo "::error::IPA SHA-256 must contain exactly 64 hexadecimal characters."
+            exit 1
+          fi
+
+          wget "$IPA_URL" --no-verbose -O youtube.ipa
+
+          expected_sha256="$(printf '%s' "$IPA_SHA256" | tr '[:upper:]' '[:lower:]')"
+          actual_sha256="$(shasum -a 256 youtube.ipa | awk '{print $1}')"
+          if [ -n "$expected_sha256" ] && [ "$actual_sha256" != "$expected_sha256" ]; then
+            echo "::error::IPA SHA-256 mismatch. Expected $IPA_SHA256 but downloaded $actual_sha256."
+            exit 1
+          fi
+          if [ -z "$IPA_SHA256" ]; then
+            echo "::warning::No IPA SHA-256 was supplied. Downloaded IPA hash: $actual_sha256"
+          fi
+
           file_type="$(file --mime-type -b youtube.ipa)"
           if [[ "$file_type" != "application/x-ios-app" && "$file_type" != "application/zip" ]]; then
             echo "::error::The downloaded file is not a valid IPA. Detected type: $file_type"
@@ -130,25 +157,51 @@ jobs:
           fi
 
       - name: Install Cyan
-        run: pipx install --force https://github.com/asdfzxcvbn/pyzule-rw/archive/main.zip
+        run: pipx install --force https://github.com/asdfzxcvbn/pyzule-rw/archive/740d3716dcd98c20c000f12cdb88f1f0b2a533a4.zip
 
       - name: Inject YTMinimum
+        env:
+          DISPLAY_NAME: ${{ inputs.display_name }}
+          BUNDLE_ID: ${{ inputs.bundle_id }}
         run: |
           output="YTMinimum_YouTube_21.30.5_${{ github.run_number }}.ipa"
           cyan \
             -i youtube.ipa \
             -o "$output" \
             -uwef ytminimum.deb \
-            -n "${{ github.event.inputs.display_name }}" \
-            -b "${{ github.event.inputs.bundle_id }}"
+            -n "$DISPLAY_NAME" \
+            -b "$BUNDLE_ID"
+
+      - name: Upload packaged IPA
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: packaged-ipa
+          path: YTMinimum_YouTube_21.30.5_${{ github.run_number }}.ipa
+          if-no-files-found: error
+          retention-days: 1
+
+  release:
+    name: Create draft release
+    runs-on: macos-latest
+    needs: package
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download packaged IPA
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: packaged-ipa
+          path: ${{ github.workspace }}
 
       - name: Upload to draft GitHub Release
-        uses: softprops/action-gh-release@v3
-        with:
-          tag_name: ytminimum-${{ github.run_number }}
-          name: YTMinimum for YouTube 21.30.5 (${{ github.run_number }})
-          files: YTMinimum_YouTube_21.30.5_${{ github.run_number }}.ipa
-          draft: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "ytminimum-${{ github.run_number }}" \
+            "YTMinimum_YouTube_21.30.5_${{ github.run_number }}.ipa" \
+            --draft \
+            --title "YTMinimum for YouTube 21.30.5 (${{ github.run_number }})"
 
       - name: Output release URL
         run: echo "::notice::Release available at https://github.com/${{ github.repository }}/releases"

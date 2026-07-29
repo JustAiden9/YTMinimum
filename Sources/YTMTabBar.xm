@@ -124,7 +124,7 @@ static const void *YTMTabBlurAssociation = &YTMTabBlurAssociation;
 
 %hook YTPivotBarViewController
 - (void)selectItemWithPivotIdentifier:(NSString *)identifier {
-    if (identifier.length > 0) YTMCurrentPivotIdentifier = identifier.copy;
+    if (identifier.length > 0) YTMSetCurrentPivotIdentifier(identifier);
     %orig(identifier);
 }
 
@@ -138,6 +138,11 @@ static const void *YTMTabBlurAssociation = &YTMTabBlurAssociation;
         startup = YTMStringArray(@"activeTabs").firstObject;
     }
     if (startup.length == 0) return;
+
+    // Re-selecting the tab YouTube already opened would reload the feed for no
+    // reason, so the startup page is only forced when it differs.
+    NSString *selected = YTMSafeValueForKey(self, @"selectedPivotIdentifier");
+    if ([selected isKindOfClass:NSString.class] && [selected isEqualToString:startup]) return;
 
     dispatch_async(dispatch_get_main_queue(), ^{
         SEL selector = NSSelectorFromString(@"selectItemWithPivotIdentifier:");

@@ -1,21 +1,33 @@
 #import "YTMCommon.h"
+#import <stdatomic.h>
 
 NSString *const YTMDefaultsSuite = @"com.aiden.ytminimum";
 NSString *const YTMSupportedYouTubeVersion = @"21.30.5";
-NSString *YTMCurrentPivotIdentifier = @"FEwhat_to_watch";
+static atomic_bool YTMPivotIsSubscriptions = false;
+
+void YTMSetCurrentPivotIdentifier(NSString *identifier) {
+    atomic_store(&YTMPivotIsSubscriptions, [identifier isEqualToString:@"FEsubscriptions"]);
+}
+
+BOOL YTMCurrentPivotIsSubscriptions(void) {
+    return atomic_load(&YTMPivotIsSubscriptions);
+}
+
+static atomic_ullong YTMGeneration = 1;
 
 static NSDictionary *YTMRegisteredDefaults(void) {
     return @{
-        // Feed defaults mirror the supplied screenshots.
+        // Feed. Options that depend on YouTube's own layout identifiers start
+        // disabled: identifiers change between releases, so they are opt-in.
         @"noAds": @YES,
         @"hideShorts": @YES,
         @"keepSubsShorts": @NO,
-        @"removeMoreTopics": @YES,
-        @"removeCommunityPosts": @YES,
-        @"removeMixes": @YES,
-        @"removeLive": @NO,
-        @"removeHorizontalFeeds": @YES,
-        @"removePlayables": @YES,
+        @"removeMoreTopics": @NO,
+        @"removeCommunityPosts": @NO,
+        @"removeMixes": @NO,
+        @"removeHorizontalFeeds": @NO,
+        @"removePlayables": @NO,
+        @"removePromoBanners": @YES,
         @"fixCovers": @YES,
 
         // Player.
@@ -54,6 +66,14 @@ NSUserDefaults *YTMDefaults(void) {
     return defaults;
 }
 
+uint64_t YTMSettingsGeneration(void) {
+    return atomic_load(&YTMGeneration);
+}
+
+static void YTMSettingsDidChange(void) {
+    atomic_fetch_add(&YTMGeneration, 1);
+}
+
 BOOL YTMBool(NSString *key) {
     return [YTMDefaults() boolForKey:key];
 }
@@ -80,10 +100,12 @@ NSArray<NSString *> *YTMStringArray(NSString *key) {
 
 void YTMSetBool(NSString *key, BOOL value) {
     [YTMDefaults() setBool:value forKey:key];
+    YTMSettingsDidChange();
 }
 
 void YTMSetInteger(NSString *key, NSInteger value) {
     [YTMDefaults() setInteger:value forKey:key];
+    YTMSettingsDidChange();
 }
 
 void YTMSetObject(NSString *key, id value) {
@@ -92,6 +114,15 @@ void YTMSetObject(NSString *key, id value) {
     } else {
         [YTMDefaults() removeObjectForKey:key];
     }
+    YTMSettingsDidChange();
+}
+
+void YTMResetSettings(void) {
+    NSUserDefaults *defaults = YTMDefaults();
+    for (NSString *key in YTMRegisteredDefaults()) {
+        [defaults removeObjectForKey:key];
+    }
+    YTMSettingsDidChange();
 }
 
 static UIColor *YTMColorFromHexString(NSString *hex) {
@@ -134,9 +165,23 @@ NSString *YTMHexStringFromColor(UIColor *color) {
             lround(red * 255.0), lround(green * 255.0), lround(blue * 255.0)];
 }
 
-BOOL YTMIsSupportedYouTubeVersion(void) {
+NSString *YTMInstalledYouTubeVersion(void) {
     NSString *version = NSBundle.mainBundle.infoDictionary[@"CFBundleShortVersionString"];
-    return [version isEqualToString:YTMSupportedYouTubeVersion];
+    return [version isKindOfClass:NSString.class] ? version : @"";
+}
+
+// YTMinimum is built against YTMSupportedYouTubeVersion, but refusing to load on
+// every other build would silently disable the tweak after a YouTube update and
+// leave the settings toggles doing nothing. Anything from the same major release
+// is accepted; the exact pairing is reported in the settings page instead.
+BOOL YTMIsSupportedYouTubeVersion(void) {
+    NSString *installed = YTMInstalledYouTubeVersion();
+    if (installed.length == 0) return NO;
+    if ([installed isEqualToString:YTMSupportedYouTubeVersion]) return YES;
+
+    NSString *installedMajor = [installed componentsSeparatedByString:@"."].firstObject;
+    NSString *supportedMajor = [YTMSupportedYouTubeVersion componentsSeparatedByString:@"."].firstObject;
+    return installedMajor.length > 0 && [installedMajor isEqualToString:supportedMajor];
 }
 
 id YTMSafeValueForKey(id object, NSString *key) {
