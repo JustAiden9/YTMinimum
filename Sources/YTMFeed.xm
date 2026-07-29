@@ -7,57 +7,50 @@ static BOOL YTMElementHasAdMetadata(id element) {
     return [adLoggingData respondsToSelector:@selector(boolValue)] && [adLoggingData boolValue];
 }
 
-static BOOL YTMShouldHideFeedElement(id element) {
-    NSString *description = [[element description] lowercaseString];
+static NSString *YTMElementDescription(id element) {
+    NSString *description = [element description];
+    return [description isKindOfClass:NSString.class] ? description.lowercaseString : @"";
+}
 
-    if (YTMBool(@"noAds")) {
-        NSArray *adTokens = @[
-            @"ad_logging_data",
-            @"brand_promo",
-            @"compact_promoted",
-            @"feed_ad_metadata",
-            @"landscape_image_wide_button_layout",
-            @"product_carousel",
-            @"product_engagement_panel",
-            @"product_item",
-            @"promoted_video",
-            @"square_image_layout",
-            @"text_image_button_layout",
-            @"text_search_ad",
-        ];
-        for (NSString *token in adTokens) {
-            if ([description containsString:token]) return YES;
-        }
-    }
+static BOOL YTMElementDescriptionEqualsAny(NSString *description, NSArray<NSString *> *identifiers) {
+    if (description.length == 0) return NO;
+    return [identifiers containsObject:description];
+}
+
+// Element descriptions can include an entire nested feed tree. Never search those
+// descriptions for broad words such as "post" or "horizontal": a single child
+// match would suppress the parent renderer and leave an empty, full-height feed.
+// YTLite avoids that failure by limiting this hook to exact renderer identifiers,
+// with containsString used only for YouTube's established Shorts identifiers.
+static BOOL YTMShouldHideNonAdFeedElement(id element) {
+    NSString *description = YTMElementDescription(element);
 
     BOOL isSubscriptions = [YTMCurrentPivotIdentifier isEqualToString:@"FEsubscriptions"];
     BOOL preserveSubscriptionShorts = isSubscriptions && YTMBool(@"keepSubsShorts");
-    if (YTMBool(@"hideShorts") && !preserveSubscriptionShorts) {
-        NSArray *shortsTokens = @[
+    if (YTMBool(@"hideShorts") && !preserveSubscriptionShorts &&
+        ![description containsString:@"history*"]) {
+        NSArray *shortsIdentifiers = @[
+            @"shorts_shelf.eml",
+            @"shorts_video_cell.eml",
             @"6shorts",
-            @"shorts_grid",
-            @"shorts_lockup",
-            @"shorts_shelf",
-            @"shorts_video_cell",
         ];
-        for (NSString *token in shortsTokens) {
-            if ([description containsString:token]) return YES;
+        for (NSString *identifier in shortsIdentifiers) {
+            if ([description containsString:identifier]) return YES;
         }
     }
 
-    NSDictionary<NSString *, NSArray<NSString *> *> *filters = @{
-        @"removeMoreTopics": @[@"more_topics", @"more topics", @"moretopics"],
+    NSDictionary<NSString *, NSArray<NSString *> *> *exactFilters = @{
+        @"removeMoreTopics": @[@"more_topics", @"moretopics"],
         @"removeCommunityPosts": @[@"backstage_post", @"community_post", @"post_base_wrapper", @"post_root"],
         @"removeMixes": @[@"mix_card", @"mix_playlist", @"radio_playlist", @"radio_renderer"],
-        @"removeLive": @[@"badge_style_type_live_now", @"live_now", @"live_video"],
+        @"removeLive": @[@"live_video"],
         @"removeHorizontalFeeds": @[@"horizontal_list", @"horizontal_shelf", @"horizontal_video_shelf"],
         @"removePlayables": @[@"game_card", @"mini_game", @"playables", @"playables_game"],
     };
 
-    for (NSString *key in filters) {
-        if (!YTMBool(key)) continue;
-        for (NSString *token in filters[key]) {
-            if ([description containsString:token]) return YES;
+    for (NSString *key in exactFilters) {
+        if (YTMBool(key) && YTMElementDescriptionEqualsAny(description, exactFilters[key])) {
+            return YES;
         }
     }
 
@@ -114,7 +107,28 @@ static NSURL *YTMFixedCoverURL(NSURL *originalURL) {
 %hook YTIElementRenderer
 - (NSData *)elementData {
     if (YTMBool(@"noAds") && YTMElementHasAdMetadata(self)) return nil;
-    if (YTMShouldHideFeedElement(self)) return nil;
+
+    NSString *description = YTMElementDescription(self);
+    NSArray *adRendererIdentifiers = @[
+        @"brand_promo",
+        @"product_carousel",
+        @"product_engagement_panel",
+        @"product_item",
+        @"text_search_ad",
+        @"text_image_button_layout",
+        @"carousel_headered_layout",
+        @"carousel_footered_layout",
+        @"square_image_layout",
+        @"landscape_image_wide_button_layout",
+        @"feed_ad_metadata",
+    ];
+    if (YTMBool(@"noAds") && YTMElementDescriptionEqualsAny(description, adRendererIdentifiers)) {
+        // Match YTLite's behavior: return valid empty data for these layout
+        // renderers instead of removing a potentially shared parent renderer.
+        return [NSData data];
+    }
+
+    if (YTMShouldHideNonAdFeedElement(self)) return nil;
     return %orig;
 }
 %end
@@ -203,4 +217,3 @@ static NSURL *YTMFixedCoverURL(NSURL *originalURL) {
         %init(YTMFeedHooks);
     }
 }
-
