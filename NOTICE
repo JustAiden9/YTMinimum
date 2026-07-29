@@ -1,0 +1,9 @@
+YTMinimum is derived in part from the MIT-licensed YTLite source that was
+published by dayanch96 before the upstream license file was removed.
+
+The original copyright and MIT license are retained in LICENSE.
+
+YTMinimum does not include YouTube, a decrypted YouTube IPA, or the paid
+YouTube Plus/YTPlus binary. Users must provide their own legally obtained
+decrypted IPA when running the packaging workflow.
+

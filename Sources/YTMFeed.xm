@@ -1,0 +1,206 @@
+#import <Foundation/Foundation.h>
+#import "YTMCommon.h"
+
+static BOOL YTMElementHasAdMetadata(id element) {
+    id compatibility = YTMSafeValueForKey(element, @"compatibilityOptions");
+    id adLoggingData = YTMSafeValueForKey(compatibility, @"hasAdLoggingData");
+    return [adLoggingData respondsToSelector:@selector(boolValue)] && [adLoggingData boolValue];
+}
+
+static BOOL YTMShouldHideFeedElement(id element) {
+    NSString *description = [[element description] lowercaseString];
+
+    if (YTMBool(@"noAds")) {
+        NSArray *adTokens = @[
+            @"ad_logging_data",
+            @"brand_promo",
+            @"compact_promoted",
+            @"feed_ad_metadata",
+            @"landscape_image_wide_button_layout",
+            @"product_carousel",
+            @"product_engagement_panel",
+            @"product_item",
+            @"promoted_video",
+            @"square_image_layout",
+            @"text_image_button_layout",
+            @"text_search_ad",
+        ];
+        for (NSString *token in adTokens) {
+            if ([description containsString:token]) return YES;
+        }
+    }
+
+    BOOL isSubscriptions = [YTMCurrentPivotIdentifier isEqualToString:@"FEsubscriptions"];
+    BOOL preserveSubscriptionShorts = isSubscriptions && YTMBool(@"keepSubsShorts");
+    if (YTMBool(@"hideShorts") && !preserveSubscriptionShorts) {
+        NSArray *shortsTokens = @[
+            @"6shorts",
+            @"shorts_grid",
+            @"shorts_lockup",
+            @"shorts_shelf",
+            @"shorts_video_cell",
+        ];
+        for (NSString *token in shortsTokens) {
+            if ([description containsString:token]) return YES;
+        }
+    }
+
+    NSDictionary<NSString *, NSArray<NSString *> *> *filters = @{
+        @"removeMoreTopics": @[@"more_topics", @"more topics", @"moretopics"],
+        @"removeCommunityPosts": @[@"backstage_post", @"community_post", @"post_base_wrapper", @"post_root"],
+        @"removeMixes": @[@"mix_card", @"mix_playlist", @"radio_playlist", @"radio_renderer"],
+        @"removeLive": @[@"badge_style_type_live_now", @"live_now", @"live_video"],
+        @"removeHorizontalFeeds": @[@"horizontal_list", @"horizontal_shelf", @"horizontal_video_shelf"],
+        @"removePlayables": @[@"game_card", @"mini_game", @"playables", @"playables_game"],
+    };
+
+    for (NSString *key in filters) {
+        if (!YTMBool(key)) continue;
+        for (NSString *token in filters[key]) {
+            if ([description containsString:token]) return YES;
+        }
+    }
+
+    return NO;
+}
+
+static NSURL *YTMFixedCoverURL(NSURL *originalURL) {
+    if (!YTMBool(@"fixCovers") || !originalURL) return originalURL;
+
+    NSDictionary<NSString *, NSString *> *replacementHosts = @{
+        @"yt3.ggpht.com": @"yt4.ggpht.com",
+        @"yt3.googleusercontent.com": @"yt4.googleusercontent.com",
+    };
+    NSString *replacement = replacementHosts[originalURL.host.lowercaseString];
+    if (!replacement) return originalURL;
+
+    NSURLComponents *components = [NSURLComponents componentsWithURL:originalURL resolvingAgainstBaseURL:NO];
+    components.host = replacement;
+    return components.URL ?: originalURL;
+}
+
+%group YTMFeedHooks
+
+// Background playback and ad hooks originate from the MIT-licensed YTLite
+// implementation and are intentionally kept small and version-gated here.
+%hook YTIPlayerResponse
+- (BOOL)isMonetized {
+    return YTMBool(@"noAds") ? NO : %orig;
+}
+%end
+
+%hook YTDataUtils
++ (id)spamSignalsDictionary {
+    return YTMBool(@"noAds") ? nil : %orig;
+}
+
++ (id)spamSignalsDictionaryWithoutIDFA {
+    return YTMBool(@"noAds") ? nil : %orig;
+}
+%end
+
+%hook YTAdsInnerTubeContextDecorator
+- (void)decorateContext:(id)context {
+    if (!YTMBool(@"noAds")) %orig(context);
+}
+%end
+
+%hook YTAccountScopedAdsInnerTubeContextDecorator
+- (void)decorateContext:(id)context {
+    if (!YTMBool(@"noAds")) %orig(context);
+}
+%end
+
+%hook YTIElementRenderer
+- (NSData *)elementData {
+    if (YTMBool(@"noAds") && YTMElementHasAdMetadata(self)) return nil;
+    if (YTMShouldHideFeedElement(self)) return nil;
+    return %orig;
+}
+%end
+
+%hook YTSectionListViewController
+- (void)loadWithModel:(id)model {
+    if (YTMBool(@"noAds")) {
+        NSMutableArray *contents = YTMSafeValueForKey(model, @"contentsArray");
+        if ([contents isKindOfClass:NSMutableArray.class]) {
+            NSIndexSet *indexes = [contents indexesOfObjectsPassingTest:^BOOL(id supportedRenderer, NSUInteger index, BOOL *stop) {
+                id section = YTMSafeValueForKey(supportedRenderer, @"itemSectionRenderer");
+                NSArray *sectionContents = YTMSafeValueForKey(section, @"contentsArray");
+                id first = [sectionContents isKindOfClass:NSArray.class] ? sectionContents.firstObject : nil;
+                NSArray *promotedKeys = @[
+                    @"hasPromotedVideoRenderer",
+                    @"hasCompactPromotedVideoRenderer",
+                    @"hasPromotedVideoInlineMutedRenderer",
+                ];
+                for (NSString *key in promotedKeys) {
+                    id value = YTMSafeValueForKey(first, key);
+                    if ([value respondsToSelector:@selector(boolValue)] && [value boolValue]) return YES;
+                }
+                return NO;
+            }];
+            [contents removeObjectsAtIndexes:indexes];
+        }
+    }
+    %orig(model);
+}
+%end
+
+%hook YTCommerceEventGroupHandler
+- (void)addEventHandlers {
+    if (!YTMBool(@"noAds")) %orig;
+}
+%end
+
+%hook YTInterstitialPromoEventGroupHandler
+- (void)addEventHandlers {
+    if (!YTMBool(@"noAds")) %orig;
+}
+%end
+
+%hook YTPromosheetEventGroupHandler
+- (void)addEventHandlers {
+    if (!YTMBool(@"noAds")) %orig;
+}
+%end
+
+%hook YTPromoThrottleController
+- (BOOL)canShowThrottledPromo {
+    return YTMBool(@"noAds") ? NO : %orig;
+}
+
+- (BOOL)canShowThrottledPromoWithFrequencyCap:(id)cap {
+    return YTMBool(@"noAds") ? NO : %orig(cap);
+}
+
+- (BOOL)canShowThrottledPromoWithFrequencyCaps:(id)caps {
+    return YTMBool(@"noAds") ? NO : %orig(caps);
+}
+%end
+
+%hook YTIShowFullscreenInterstitialCommand
+- (BOOL)shouldThrottleInterstitial {
+    return YTMBool(@"noAds") ? YES : %orig;
+}
+%end
+
+%hook YTSurveyController
+- (void)showSurveyWithRenderer:(id)renderer surveyParentResponder:(id)responder {
+    if (!YTMBool(@"noAds")) %orig(renderer, responder);
+}
+%end
+
+%hook YTImageSelectionStrategyImageURLs
+- (id)initWithSelectedImageURL:(NSURL *)selectedImageURL updatedImageURL:(NSURL *)updatedImageURL {
+    return %orig(YTMFixedCoverURL(selectedImageURL), YTMFixedCoverURL(updatedImageURL));
+}
+%end
+
+%end
+
+%ctor {
+    if (YTMIsSupportedYouTubeVersion()) {
+        %init(YTMFeedHooks);
+    }
+}
+
